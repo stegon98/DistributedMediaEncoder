@@ -6,23 +6,43 @@ from queue import Queue
 import time
 
 # Constants
-NUM_NODES = 2
+NUM_NODES = 3
 WORK_FOLDER = 'work'
 OUTPUT_FOLDER = 'output'
 VIDEO_FILE = 'input_video.mp4'
-FFMPEG_CMD_TEMPLATE = 'ffmpeg -i {} -c:v libx265 -preset fast -crf 20 -c:a copy {}'
+FFMPEG_CMD_TEMPLATE = 'ffmpeg -i {} -c:v libx265 -preset slow -crf 28 -c:a copy {}'
 
 # Create work and output folders if they don't exist
 os.makedirs(WORK_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-def scan_for_nodes():
+def scan_for_nodes(broadcast_ip='255.255.255.255', broadcast_port=10000, listen_port=5000):
     nodes = []
-    # Placeholder for actual network scanning logic
-    for i in range(NUM_NODES):
-        node_ip = f'192.168.1.{100 + i}'
-        node_port = 5000 + i
-        nodes.append((node_ip, node_port))
+
+    # Setup socket for broadcasting
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.sendto(b'NODE_SCAN', (broadcast_ip, broadcast_port))
+        print(f'Broadcasting to {broadcast_ip}:{broadcast_port}')
+
+        # Setup socket for listening
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listen_socket:
+            listen_socket.bind(('0.0.0.0', listen_port))
+            listen_socket.listen()
+
+            timeout = time.time() + 2  # Timeout after 2 seconds
+            while time.time() < timeout:
+                try:
+                    conn, addr = listen_socket.accept()
+                    with conn:
+                        data = conn.recv(1024).decode()
+                        if 'NODE_RESPONSE' in data:
+                            node_ip, node_port = data.split(' ')[1:]
+                            nodes.append((node_ip, int(node_port)))
+                            print(f'Received response from {node_ip}:{node_port}')
+                except socket.timeout:
+                    break
+
     return nodes
 
 def split_video(file_path, segment_length=60):
@@ -66,6 +86,9 @@ def concatenate_videos():
 
 def main():
     nodes = scan_for_nodes()
+    if not nodes:
+        print('No nodes found')
+        return
     split_video(VIDEO_FILE)
     distribute_jobs(nodes)
     concatenate_videos()
