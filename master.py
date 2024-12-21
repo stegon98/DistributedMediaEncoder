@@ -1,115 +1,74 @@
-import socket
 import os
-from multiprocessing import Pool
-from subprocess import Popen, PIPE
-import queue
+import socket
+import subprocess
+import threading
+from queue import Queue
 import time
 
-# Define a function to benchmark the computational power of a node
-def benchmark(node):
-    # Send a sample file to the node and measure the time it takes to complete
-    with open("sample.mp4", "rb") as f:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((node, 12345))
-        sock.sendall(f.read())
+# Constants
+NUM_NODES = 2
+WORK_FOLDER = 'work'
+OUTPUT_FOLDER = 'output'
+VIDEO_FILE = 'input_video.mp4'
+FFMPEG_CMD_TEMPLATE = 'ffmpeg -i {} -c:v libx265 -preset fast -crf 20 -c:a copy {}'
 
-    # Measure the time it took to send and process the sample file
-    start_time = time.time()
-    os.system(f"ffmpeg -i {f.name} -c:v h265 -crf 18 output.mp4")
-    end_time = time.time()
+# Create work and output folders if they don't exist
+os.makedirs(WORK_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-    # Return the computational power of the node
-    return 1 / (end_time - start_time)
+def scan_for_nodes():
+    nodes = []
+    # Placeholder for actual network scanning logic
+    for i in range(NUM_NODES):
+        node_ip = f'192.168.1.{100 + i}'
+        node_port = 5000 + i
+        nodes.append((node_ip, node_port))
+    return nodes
 
-# Define a function to split the video into segments and send them to nodes
-def split_video(file_name, num_nodes):
-    # Split the video into 60-second segments
-    command = f"ffmpeg -i {file_name} -c:v h265 -crf 18 -segment_times 1,2,3,4,5,6,7,8,9,10 output%03d.mp4"
-    os.system(command)
+def split_video(file_path, segment_length=60):
+    # Placeholder for actual video splitting logic using ffmpeg
+    command = f'ffmpeg -i {file_path} -c copy -map 0 -segment_time {segment_length} -f segment -reset_timestamps 1 {WORK_FOLDER}/video_%03d.mp4'
+    subprocess.run(command, shell=True)
 
-    # Get the number of segments
-    num_segments = len(os.listdir("segments"))
+def distribute_jobs(nodes):
+    jobs = Queue()
+    for file in sorted(os.listdir(WORK_FOLDER)):
+        if file.endswith('.mp4'):
+            jobs.put(file)
 
-    # Create a pool of worker processes
-    with Pool(processes=num_nodes) as pool:
-        # Map the benchmark function to each node and get their computational powers
-        computational_powers = pool.map(benchmark, nodes)
+    threads = []
+    for node_ip, node_port in nodes:
+        t = threading.Thread(target=handle_node, args=(node_ip, node_port, jobs))
+        threads.append(t)
+        t.start()
 
-    # Assign more jobs to faster nodes and fewer jobs to slower nodes
-    assignments = {}
-    for i in range(num_segments):
-        assignments[i] = nodes[np.argmin([abs(computational_powers[j] - 1) for j in range(len(nodes))])]
+    for t in threads:
+        t.join()
 
-    return assignments
+def handle_node(node_ip, node_port, jobs):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((node_ip, node_port))
+        while not jobs.empty():
+            job = jobs.get()
+            print(f'Sending {job} to {node_ip}:{node_port}')
+            s.sendall(job.encode())
+            response = s.recv(1024).decode()
+            if 'done' in response:
+                print(f'Received {response} from {node_ip}:{node_port}')
+            else:
+                print(f'Error: {response}')
+            jobs.task_done()
 
-# Define a function to send segments to nodes and wait for completion
-def send_segments(assignments, file_name, num_nodes):
-    # Create a queue to store the completed segments
-    queue = queue.Queue()
+def concatenate_videos():
+    # Placeholder for actual video concatenation logic using ffmpeg
+    command = f'ffmpeg -f concat -safe 0 -i <(for f in {WORK_FOLDER}/*.mp4; do echo "file \'$f\'"; done) -c copy {OUTPUT_FOLDER}/output_video.mp4'
+    subprocess.run(command, shell=True)
 
-    # Create a pool of worker processes
-    with Pool(processes=num_nodes) as pool:
-        # Map the encode function to each node and get their completion percentages
-        completion_percentages = pool.starmap(encode, [(assignments[i], i, file_name) for i in range(len(assignments))])
+def main():
+    nodes = scan_for_nodes()
+    split_video(VIDEO_FILE)
+    distribute_jobs(nodes)
+    concatenate_videos()
 
-    # Get the completed segments from the queue
-    completed_segments = []
-    while not queue.empty():
-        completed_segments.append(queue.get())
-
-    return completed_segments
-
-# Define a function to concatenate the completed segments
-def concatenate_segments(completed_segments):
-    # Create an output file name
-    output_file_name = "output.mp4"
-
-    # Concatenate the completed segments
-    command = f"ffmpeg -f concat -i temp.txt -c copy {output_file_name}"
-    with open("temp.txt", "w") as f:
-        for segment in completed_segments:
-            f.write(f"file '{segment}'\n")
-    os.system(command)
-
-    # Remove the temporary files
-    os.remove("temp.txt")
-
-# Define a function to encode a segment on a node
-def encode(node, index, file_name):
-    # Connect to the node and send the segment
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((node, 12345))
-    with open(f"segments/output{index}.mp4", "rb") as f:
-        sock.sendall(f.read())
-
-    # Wait for the node to complete encoding the segment
-    completion_percentage = float(sock.recv(1024).decode("utf-8"))
-
-    # Get the completed segment from the node
-    completed_segment = b""
-    while len(completed_segment) < os.path.getsize(f"segments/output{index}.mp4"):
-        data = sock.recv(4096)
-        completed_segment += data
-
-    # Store the completed segment in a queue
-    queue.put((completed_segment, index))
-
-    return completion_percentage
-
-# Define the number of nodes to use
-num_nodes = 2
-
-# Define the nodes to connect to
-nodes = [f"node{i}" for i in range(num_nodes)]
-
-# Get the video file name from the user
-file_name = input("Enter the video file name: ")
-
-# Split the video into segments and send them to nodes
-assignments = split_video(file_name, num_nodes)
-
-# Send the segments to nodes and wait for completion
-completed_segments = send_segments(assignments, file_name, num_nodes)
-
-# Concatenate the completed segments
-concatenate_segments(completed_segments)
+if __name__ == '__main__':
+    main()

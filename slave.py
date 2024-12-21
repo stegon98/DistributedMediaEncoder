@@ -1,51 +1,60 @@
+import os
 import socket
-from subprocess import Popen, PIPE
+import subprocess
+import threading
+import time
 
-# Define a function to wait for a node and tell the master that the node is ready to receive a job
-def wait_for_node(master_ip):
-    # Wait for the master to send a message indicating that it has assigned a job to this node
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((master_ip, 12345))
+# Constants
+NODE_IP = '192.168.0.101'  # Replace with actual IP address
+NODE_PORT = 5000  # Replace with actual port number
+WORK_FOLDER = 'work'
+OUTPUT_FOLDER = 'output'
+FFMPEG_CMD_TEMPLATE = 'ffmpeg -i {} -c:v libx265 -preset fast -crf 20 -c:a copy {}'
 
-    # Get the segment name from the master
-    segment_name = sock.recv(1024).decode("utf-8")
+# Create work and output folders if they don't exist
+os.makedirs(WORK_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-    return segment_name
+def handle_client(conn, addr):
+    print(f'Connected by {addr}')
+    while True:
+        data = conn.recv(1024).decode()
+        if not data:
+            break
+        job = data.strip()
+        if job:
+            print(f'Received job: {job}')
+            input_path = os.path.join(WORK_FOLDER, job)
+            output_path = os.path.join(OUTPUT_FOLDER, f'converted_{job}')
+            convert_video(input_path, output_path, conn)
 
-# Define a function to encode a segment on this node
-def encode_segment(segment_name):
-    # Connect to the master and send the completion percentage
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect(("master_node_ip", 12345))
-    with open(segment_name, "rb") as f:
-        sock.sendall(f.read())
+def convert_video(input_path, output_path, conn):
+    try:
+        command = FFMPEG_CMD_TEMPLATE.format(input_path, output_path)
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        while True:
+            output = process.stdout.readline()
+            if output == b'' and process.poll() is not None:
+                break
+            if output:
+                conn.sendall(output)
+        rc = process.poll()
+        if rc == 0:
+            conn.sendall(b'done')
+            print(f'Converted {input_path} to {output_path}')
+    except Exception as e:
+        print(f'Error during conversion: {e}')
+        conn.sendall(b'error')
 
-    # Wait for the master to send a message indicating that it has received the completed segment
-    completion_percentage = float(sock.recv(1024).decode("utf-8"))
+def start_server():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((NODE_IP, NODE_PORT))
+        s.listen()
+        print(f'Slave node listening on {NODE_IP}:{NODE_PORT}')
+        while True:
+            conn, addr = s.accept()
+            thread = threading.Thread(target=handle_client, args=(conn, addr))
+            thread.start()
 
-    return completion_percentage
-
-# Define the function to run on each node
-def run_node(num_nodes):
-    # Wait for the master to assign a job to this node
-    segment_name = wait_for_node(f"master_node_ip")
-
-    # Encode the segment
-    completion_percentage = encode_segment(segment_name)
-
-    # Return the completion percentage
-    return completion_percentage
-
-# Define the function to send the completed segment back to the master
-def send_completed_segment(segment_name):
-    # Connect to the master and send the completed segment
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect(("master_node_ip", 12345))
-    with open(segment_name, "rb") as f:
-        sock.sendall(f.read())
-
-# Define the IP address of the master node
-master_node_ip = "192.168.1.100"
-
-# Run the function on this node
-run_node(4)
+if __name__ == '__main__':
+    start_server()
